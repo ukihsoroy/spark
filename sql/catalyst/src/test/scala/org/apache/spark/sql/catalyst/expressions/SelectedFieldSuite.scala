@@ -17,16 +17,16 @@
 
 package org.apache.spark.sql.catalyst.expressions
 
-import org.scalatest.BeforeAndAfterAll
 import org.scalatest.exceptions.TestFailedException
 
-import org.apache.spark.SparkFunSuite
+import org.apache.spark.sql.catalyst.analysis.AnalysisTest
 import org.apache.spark.sql.catalyst.dsl.plans._
 import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
 import org.apache.spark.sql.catalyst.plans.logical.LocalRelation
+import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.types._
 
-class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
+class SelectedFieldSuite extends AnalysisTest {
   private val ignoredField = StructField("col1", StringType, nullable = false)
 
   // The test schema as a tree string, i.e. `schema.treeString`
@@ -58,7 +58,7 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
           MapType(StringType, IntegerType, valueContainsNull = false)) :: Nil)) :: Nil)
 
   test("SelectedField should not match an attribute reference") {
-    val testRelation = LocalRelation(nestedComplex.toAttributes)
+    val testRelation = LocalRelation(nestedComplex)
     assertResult(None)(unapplySelect("col1", testRelation))
     assertResult(None)(unapplySelect("col1 as foo", testRelation))
     assertResult(None)(unapplySelect("col2", testRelation))
@@ -96,6 +96,14 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
 
   testSelect(structOfArray, "col2.field3.subfield3", "col2.field3[0].subfield3 as foo",
       "col2.field3.subfield3[0] as foo", "col2.field3[0].subfield3[0] as foo") {
+    StructField("col2", StructType(
+      StructField("field3", ArrayType(StructType(
+        StructField("subfield3", ArrayType(IntegerType)) :: Nil)), nullable = false) :: Nil))
+  }
+
+  testSelect(structOfArray, "element_at(col2.field3, 1).subfield3 as foo",
+    "element_at(col2.field3.subfield3, 0) as foo",
+    "element_at(element_at(col2.field3, 1).subfield3, 0) as foo") {
     StructField("col2", StructType(
       StructField("field3", ArrayType(StructType(
         StructField("subfield3", ArrayType(IntegerType)) :: Nil)), nullable = false) :: Nil))
@@ -144,6 +152,14 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
 
   testSelect(structWithMap,
     "col2.field4['foo'].subfield2 as foo", "col2.field4['foo'].subfield2[0] as foo") {
+    StructField("col2", StructType(
+      StructField("field4", MapType(StringType, StructType(
+        StructField("subfield2", ArrayType(IntegerType, containsNull = false))
+          :: Nil), valueContainsNull = false)) :: Nil))
+  }
+
+  testSelect(structWithMap, "element_at(col2.field4, 'foo').subfield2 as foo",
+    "element_at(element_at(col2.field4, 'foo').subfield2, 1) as foo") {
     StructField("col2", StructType(
       StructField("field4", MapType(StringType, StructType(
         StructField("subfield2", ArrayType(IntegerType, containsNull = false))
@@ -255,13 +271,19 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
     StructField("col3", ArrayType(StructType(
       StructField("field1", StructType(
         StructField("subfield1", IntegerType, nullable = false) :: Nil))
-        :: Nil), containsNull = false), nullable = false)
+        :: Nil), containsNull = true), nullable = false)
   }
 
   testSelect(arrayWithStructAndMap, "col3.field2['foo'] as foo") {
     StructField("col3", ArrayType(StructType(
       StructField("field2", MapType(StringType, IntegerType, valueContainsNull = false))
-        :: Nil), containsNull = false), nullable = false)
+        :: Nil), containsNull = true), nullable = false)
+  }
+
+  testSelect(arrayWithStructAndMap, "element_at(col3.field2, 'foo') as foo") {
+    StructField("col3", ArrayType(StructType(
+      StructField("field2", MapType(StringType, IntegerType, valueContainsNull = false))
+        :: Nil), containsNull = true), nullable = false)
   }
 
   //  |-- col1: string (nullable = false)
@@ -317,6 +339,18 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
         StructField("subfield1", IntegerType) :: Nil)) :: Nil), valueContainsNull = false)))
   }
 
+  testSelect(arrayOfStruct, "map_values(col5[0]).field1.subfield1 as foo") {
+    StructField("col5", ArrayType(MapType(StringType, StructType(
+      StructField("field1", StructType(
+        StructField("subfield1", IntegerType) :: Nil)) :: Nil), valueContainsNull = false)))
+  }
+
+  testSelect(arrayOfStruct, "map_values(col5[0]).field1.subfield2 as foo") {
+    StructField("col5", ArrayType(MapType(StringType, StructType(
+      StructField("field1", StructType(
+        StructField("subfield2", IntegerType) :: Nil)) :: Nil), valueContainsNull = false)))
+  }
+
   //  |-- col1: string (nullable = false)
   //  |-- col6: map (nullable = true)
   //  |    |-- key: string
@@ -332,6 +366,12 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
         StructField("subfield2", IntegerType) :: Nil)) :: Nil), containsNull = false)))))
 
   testSelect(mapOfArray, "col6['foo'][0].field1.subfield1 as foo") {
+    StructField("col6", MapType(StringType, ArrayType(StructType(
+      StructField("field1", StructType(
+        StructField("subfield1", IntegerType) :: Nil)) :: Nil), containsNull = false)))
+  }
+
+  testSelect(mapOfArray, "element_at(element_at(col6, 'foo'), 0).field1.subfield1 as foo") {
     StructField("col6", MapType(StringType, ArrayType(StructType(
       StructField("field1", StructType(
         StructField("subfield1", IntegerType) :: Nil)) :: Nil), containsNull = false)))
@@ -357,6 +397,12 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
 
   testSelect(arrayWithMultipleFields,
     "col7.field1", "col7[0].field1 as foo", "col7.field1[0] as foo") {
+    StructField("col7", ArrayType(StructType(
+      StructField("field1", IntegerType, nullable = false) :: Nil)))
+  }
+
+  testSelect(arrayWithMultipleFields,
+    "col7.field1", "element_at(col7, 0).field1 as foo", "element_at(col7.field1, 0) as foo") {
     StructField("col7", ArrayType(StructType(
       StructField("field1", IntegerType, nullable = false) :: Nil)))
   }
@@ -394,6 +440,90 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
         :: Nil)))
   }
 
+  //  |-- col1: string (nullable = false)
+  //  |-- col2: map (nullable = true)
+  //  |    |-- key: struct (containsNull = false)
+  //  |    |     |-- field1: string (nullable = true)
+  //  |    |     |-- field2: integer (nullable = true)
+  //  |    |-- value: array (valueContainsNull = true)
+  //  |    |    |-- element: struct (containsNull = false)
+  //  |    |    |    |-- field3: struct (nullable = true)
+  //  |    |    |    |    |-- subfield1: integer (nullable = true)
+  //  |    |    |    |    |-- subfield2: integer (nullable = true)
+  private val mapWithStructKey = StructType(Array(ignoredField,
+    StructField("col2", MapType(
+      StructType(
+        StructField("field1", StringType) ::
+        StructField("field2", IntegerType) :: Nil),
+      ArrayType(StructType(
+        StructField("field3", StructType(
+          StructField("subfield1", IntegerType) ::
+          StructField("subfield2", IntegerType) :: Nil)) :: Nil), containsNull = false)))))
+
+  testSelect(mapWithStructKey, "map_keys(col2).field1 as foo") {
+    StructField("col2", MapType(
+      StructType(StructField("field1", StringType) :: Nil),
+      ArrayType(StructType(
+        StructField("field3", StructType(
+          StructField("subfield1", IntegerType) ::
+          StructField("subfield2", IntegerType) :: Nil)) :: Nil), containsNull = false)))
+  }
+
+  testSelect(mapWithStructKey, "map_keys(col2).field2 as foo") {
+    StructField("col2", MapType(
+      StructType(StructField("field2", IntegerType) :: Nil),
+      ArrayType(StructType(
+        StructField("field3", StructType(
+          StructField("subfield1", IntegerType) ::
+          StructField("subfield2", IntegerType) :: Nil)) :: Nil), containsNull = false)))
+  }
+
+  //  |-- col1: string (nullable = false)
+  //  |-- col2: map (nullable = true)
+  //  |    |-- key: array (valueContainsNull = true)
+  //  |    |     |-- element: struct (containsNull = false)
+  //  |    |     |     |-- field1: string (nullable = true)
+  //  |    |     |     |-- field2: struct (containsNull = false)
+  //  |    |     |     |     |-- subfield1: integer (nullable = true)
+  //  |    |     |     |     |-- subfield2: long (nullable = true)
+  //  |    |-- value: array (valueContainsNull = true)
+  //  |    |    |-- element: struct (containsNull = false)
+  //  |    |    |    |-- field3: struct (nullable = true)
+  //  |    |    |    |    |-- subfield3: integer (nullable = true)
+  //  |    |    |    |    |-- subfield4: integer (nullable = true)
+  private val mapWithArrayOfStructKey = StructType(Array(ignoredField,
+    StructField("col2", MapType(
+      ArrayType(StructType(
+        StructField("field1", StringType) ::
+        StructField("field2", StructType(
+          StructField("subfield1", IntegerType) ::
+          StructField("subfield2", LongType) :: Nil)) :: Nil), containsNull = false),
+      ArrayType(StructType(
+        StructField("field3", StructType(
+          StructField("subfield3", IntegerType) ::
+          StructField("subfield4", IntegerType) :: Nil)) :: Nil), containsNull = false)))))
+
+  testSelect(mapWithArrayOfStructKey, "map_keys(col2)[0].field1 as foo") {
+    StructField("col2", MapType(
+      ArrayType(StructType(
+        StructField("field1", StringType) :: Nil), containsNull = true),
+      ArrayType(StructType(
+        StructField("field3", StructType(
+          StructField("subfield3", IntegerType) ::
+          StructField("subfield4", IntegerType) :: Nil)) :: Nil), containsNull = false)))
+  }
+
+  testSelect(mapWithArrayOfStructKey, "map_keys(col2)[0].field2.subfield1 as foo") {
+    StructField("col2", MapType(
+      ArrayType(StructType(
+        StructField("field2", StructType(
+          StructField("subfield1", IntegerType) :: Nil)) :: Nil), containsNull = true),
+      ArrayType(StructType(
+        StructField("field3", StructType(
+          StructField("subfield3", IntegerType) ::
+          StructField("subfield4", IntegerType) :: Nil)) :: Nil), containsNull = false)))
+  }
+
   def assertResult(expected: StructField)(actual: StructField)(selectExpr: String): Unit = {
     try {
       super.assertResult(expected)(actual)
@@ -405,7 +535,7 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
           indent("but it actually selected\n") +
           indent(StructType(actual :: Nil).treeString) +
           indent("Note that expected.dataType.sameType(actual.dataType) = " +
-          expected.dataType.sameType(actual.dataType)))
+          DataTypeUtils.sameType(expected.dataType, actual.dataType)))
         throw ex
     }
   }
@@ -413,7 +543,7 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
   // Test that the given SELECT expressions prune the test schema to the single-column schema
   // defined by the given field
   private def testSelect(inputSchema: StructType, selectExprs: String*)
-                        (expected: StructField) {
+                        (expected: StructField): Unit = {
     test(s"SELECT ${selectExprs.map(s => s""""$s"""").mkString(", ")} should select the schema\n" +
       indent(StructType(expected :: Nil).treeString)) {
       for (selectExpr <- selectExprs) {
@@ -423,7 +553,7 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
   }
 
   private def assertSelect(expr: String, expected: StructField, inputSchema: StructType): Unit = {
-    val relation = LocalRelation(inputSchema.toAttributes)
+    val relation = LocalRelation(inputSchema)
     unapplySelect(expr, relation) match {
       case Some(field) =>
         assertResult(expected)(field)(expr)
@@ -439,7 +569,7 @@ class SelectedFieldSuite extends SparkFunSuite with BeforeAndAfterAll {
   private def unapplySelect(expr: String, relation: LocalRelation) = {
     val parsedExpr = parseAsCatalystExpression(Seq(expr)).head
     val select = relation.select(parsedExpr)
-    val analyzed = select.analyze
+    val analyzed = getAnalyzer.execute(select)
     SelectedField.unapply(analyzed.expressions.head)
   }
 

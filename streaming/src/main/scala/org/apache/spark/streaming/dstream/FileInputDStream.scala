@@ -26,10 +26,13 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
 import org.apache.hadoop.mapreduce.{InputFormat => NewInputFormat}
 
+import org.apache.spark.internal.LogKeys.{ELAPSED_TIME, PATH}
+import org.apache.spark.internal.MDC
 import org.apache.spark.rdd.{RDD, UnionRDD}
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.scheduler.StreamInputInfo
 import org.apache.spark.util.{SerializableConfiguration, Utils}
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * This class represents an input stream that monitors a Hadoop-compatible filesystem for new
@@ -128,9 +131,9 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
   @transient private var _path: Path = null
   @transient private var _fs: FileSystem = null
 
-  override def start() { }
+  override def start(): Unit = { }
 
-  override def stop() { }
+  override def stop(): Unit = { }
 
   /**
    * Finds the files that were modified since the last time this method was called and makes
@@ -149,7 +152,7 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
       batchTimeToSelectedFiles += ((validTime, newFiles))
     }
     recentlySelectedFiles ++= newFiles
-    val rdds = Some(filesToRDD(newFiles))
+    val rdds = Some(filesToRDD(newFiles.toImmutableArraySeq))
     // Copy newFiles to immutable.List to prevent from being modified by the user
     val metadata = Map(
       "files" -> newFiles.toList,
@@ -160,7 +163,7 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
   }
 
   /** Clear the old time-to-files mappings along with old RDDs */
-  protected[streaming] override def clearMetadata(time: Time) {
+  protected[streaming] override def clearMetadata(time: Time): Unit = {
     super.clearMetadata(time)
     batchTimeToSelectedFiles.synchronized {
       val oldFiles = batchTimeToSelectedFiles.filter(_._1 < (time - rememberDuration))
@@ -202,19 +205,18 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
       val timeTaken = clock.getTimeMillis() - lastNewFileFindingTime
       logDebug(s"Finding new files took $timeTaken ms")
       if (timeTaken > slideDuration.milliseconds) {
-        logWarning(
-          s"Time taken to find new files $timeTaken exceeds the batch size. " +
-            "Consider increasing the batch size or reducing the number of " +
-            "files in the monitored directories."
+        logWarning(log"Time taken to find new files ${MDC(ELAPSED_TIME, timeTaken)} exceeds the " +
+          log"batch size. Consider increasing the batch size or reducing the number of files in " +
+          log"the monitored directories."
         )
       }
       newFiles
     } catch {
       case e: FileNotFoundException =>
-        logWarning(s"No directory to scan: $directoryPath: $e")
+        logWarning(log"No directory to scan: ${MDC(PATH, directoryPath)}:", e)
         Array.empty
       case e: Exception =>
-        logWarning(s"Error finding new files under $directoryPath", e)
+        logWarning(log"Error finding new files under ${MDC(PATH, directoryPath)}", e)
         reset()
         Array.empty
     }
@@ -271,7 +273,7 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
       return false
     }
     logDebug(s"$pathStr accepted with mod time $modTime")
-    return true
+    true
   }
 
   /** Generate one RDD from an array of files */
@@ -287,9 +289,9 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
         case None => context.sparkContext.newAPIHadoopFile[K, V, F](file)
       }
       if (rdd.partitions.isEmpty) {
-        logError("File " + file + " has no data in it. Spark Streaming can only ingest " +
-          "files that have been \"moved\" to the directory assigned to the file stream. " +
-          "Refer to the streaming programming guide for more details.")
+        logError(log"File ${MDC(PATH, file)} has no data in it. Spark Streaming can only ingest " +
+          log"""files that have been "moved" to the directory assigned to the file stream. """ +
+          log"Refer to the streaming programming guide for more details.")
       }
       rdd
     }
@@ -306,7 +308,7 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
     _fs
   }
 
-  private def reset()  {
+  private def reset(): Unit = {
     _fs = null
   }
 
@@ -328,14 +330,14 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
 
     private def hadoopFiles = data.asInstanceOf[mutable.HashMap[Time, Array[String]]]
 
-    override def update(time: Time) {
+    override def update(time: Time): Unit = {
       hadoopFiles.clear()
       batchTimeToSelectedFiles.synchronized { hadoopFiles ++= batchTimeToSelectedFiles }
     }
 
-    override def cleanup(time: Time) { }
+    override def cleanup(time: Time): Unit = { }
 
-    override def restore() {
+    override def restore(): Unit = {
       hadoopFiles.toSeq.sortBy(_._1)(Time.ordering).foreach {
         case (t, f) =>
           // Restore the metadata in both files and generatedRDDs
@@ -343,7 +345,7 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
             f.mkString("[", ", ", "]") )
           batchTimeToSelectedFiles.synchronized { batchTimeToSelectedFiles += ((t, f)) }
           recentlySelectedFiles ++= f
-          generatedRDDs += ((t, filesToRDD(f)))
+          generatedRDDs += ((t, filesToRDD(f.toImmutableArraySeq)))
       }
     }
 

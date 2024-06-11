@@ -17,20 +17,24 @@
 
 package org.apache.spark.sql.execution.streaming
 
-import org.json4s.NoTypeHints
+import org.json4s.{Formats, NoTypeHints}
 import org.json4s.jackson.Serialization
 
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKeys.{CONFIG, DEFAULT_VALUE, NEW_VALUE, OLD_VALUE, TIP}
+import org.apache.spark.io.CompressionCodec
 import org.apache.spark.sql.RuntimeConfig
-import org.apache.spark.sql.execution.streaming.state.{FlatMapGroupsWithStateExecHelper, StreamingAggregationStateManager}
-import org.apache.spark.sql.internal.SQLConf.{FLATMAPGROUPSWITHSTATE_STATE_FORMAT_VERSION, _}
+import org.apache.spark.sql.connector.read.streaming.{Offset => OffsetV2, SparkDataStream}
+import org.apache.spark.sql.execution.streaming.state.{FlatMapGroupsWithStateExecHelper, StreamingAggregationStateManager, SymmetricHashJoinStateManager}
+import org.apache.spark.sql.internal.SQLConf._
+
 
 /**
  * An ordered collection of offsets, used to track the progress of processing data from one or more
  * [[Source]]s that are present in a streaming query. This is similar to simplified, single-instance
  * vector clock that must progress linearly forward.
  */
-case class OffsetSeq(offsets: Seq[Option[Offset]], metadata: Option[OffsetSeqMetadata] = None) {
+case class OffsetSeq(offsets: Seq[Option[OffsetV2]], metadata: Option[OffsetSeqMetadata] = None) {
 
   /**
    * Unpacks an offset into [[StreamProgress]] by associating each offset with the ordered list of
@@ -39,7 +43,7 @@ case class OffsetSeq(offsets: Seq[Option[Offset]], metadata: Option[OffsetSeqMet
    * This method is typically used to associate a serialized offset with actual sources (which
    * cannot be serialized).
    */
-  def toStreamProgress(sources: Seq[BaseStreamingSource]): StreamProgress = {
+  def toStreamProgress(sources: Seq[SparkDataStream]): StreamProgress = {
     assert(sources.size == offsets.size, s"There are [${offsets.size}] sources in the " +
       s"checkpoint offsets and now there are [${sources.size}] sources requested by the query. " +
       s"Cannot continue.")
@@ -56,13 +60,13 @@ object OffsetSeq {
    * Returns a [[OffsetSeq]] with a variable sequence of offsets.
    * `nulls` in the sequence are converted to `None`s.
    */
-  def fill(offsets: Offset*): OffsetSeq = OffsetSeq.fill(None, offsets: _*)
+  def fill(offsets: OffsetV2*): OffsetSeq = OffsetSeq.fill(None, offsets: _*)
 
   /**
    * Returns a [[OffsetSeq]] with metadata and a variable sequence of offsets.
    * `nulls` in the sequence are converted to `None`s.
    */
-  def fill(metadata: Option[String], offsets: Offset*): OffsetSeq = {
+  def fill(metadata: Option[String], offsets: OffsetV2*): OffsetSeq = {
     OffsetSeq(offsets.map(Option(_)), metadata.map(OffsetSeqMetadata.apply))
   }
 }
@@ -86,10 +90,17 @@ case class OffsetSeqMetadata(
 }
 
 object OffsetSeqMetadata extends Logging {
-  private implicit val format = Serialization.formats(NoTypeHints)
+  private implicit val format: Formats = Serialization.formats(NoTypeHints)
+  /**
+   * These configs are related to streaming query execution and should not be changed across
+   * batches of a streaming query. The values of these configs are persisted into the offset
+   * log in the checkpoint position.
+   */
   private val relevantSQLConfs = Seq(
     SHUFFLE_PARTITIONS, STATE_STORE_PROVIDER_CLASS, STREAMING_MULTIPLE_WATERMARK_POLICY,
-    FLATMAPGROUPSWITHSTATE_STATE_FORMAT_VERSION, STREAMING_AGGREGATION_STATE_FORMAT_VERSION)
+    FLATMAPGROUPSWITHSTATE_STATE_FORMAT_VERSION, STREAMING_AGGREGATION_STATE_FORMAT_VERSION,
+    STREAMING_JOIN_STATE_FORMAT_VERSION, STATE_STORE_COMPRESSION_CODEC,
+    STATE_STORE_ROCKSDB_FORMAT_VERSION, STATEFUL_OPERATOR_USE_STRICT_DISTRIBUTION)
 
   /**
    * Default values of relevant configurations that are used for backward compatibility.
@@ -106,7 +117,11 @@ object OffsetSeqMetadata extends Logging {
     FLATMAPGROUPSWITHSTATE_STATE_FORMAT_VERSION.key ->
       FlatMapGroupsWithStateExecHelper.legacyVersion.toString,
     STREAMING_AGGREGATION_STATE_FORMAT_VERSION.key ->
-      StreamingAggregationStateManager.legacyVersion.toString
+      StreamingAggregationStateManager.legacyVersion.toString,
+    STREAMING_JOIN_STATE_FORMAT_VERSION.key ->
+      SymmetricHashJoinStateManager.legacyVersion.toString,
+    STATE_STORE_COMPRESSION_CODEC.key -> CompressionCodec.LZ4,
+    STATEFUL_OPERATOR_USE_STRICT_DISTRIBUTION.key -> "false"
   )
 
   def apply(json: String): OffsetSeqMetadata = Serialization.read[OffsetSeqMetadata](json)
@@ -129,8 +144,9 @@ object OffsetSeqMetadata extends Logging {
           // Config value exists in the metadata, update the session config with this value
           val optionalValueInSession = sessionConf.getOption(confKey)
           if (optionalValueInSession.isDefined && optionalValueInSession.get != valueInMetadata) {
-            logWarning(s"Updating the value of conf '$confKey' in current session from " +
-              s"'${optionalValueInSession.get}' to '$valueInMetadata'.")
+            logWarning(log"Updating the value of conf '${MDC(CONFIG, confKey)}' in current " +
+              log"session from '${MDC(OLD_VALUE, optionalValueInSession.get)}' " +
+              log"to '${MDC(NEW_VALUE, valueInMetadata)}'.")
           }
           sessionConf.set(confKey, valueInMetadata)
 
@@ -142,14 +158,15 @@ object OffsetSeqMetadata extends Logging {
 
             case Some(defaultValue) =>
               sessionConf.set(confKey, defaultValue)
-              logWarning(s"Conf '$confKey' was not found in the offset log, " +
-                s"using default value '$defaultValue'")
+              logWarning(log"Conf '${MDC(CONFIG, confKey)}' was not found in the offset log, " +
+                log"using default value '${MDC(DEFAULT_VALUE, defaultValue)}'")
 
             case None =>
               val valueStr = sessionConf.getOption(confKey).map { v =>
                 s" Using existing session conf value '$v'."
               }.getOrElse { " No value set in session conf." }
-              logWarning(s"Conf '$confKey' was not found in the offset log. $valueStr")
+              logWarning(log"Conf '${MDC(CONFIG, confKey)}' was not found in the offset log. " +
+                log"${MDC(TIP, valueStr)}")
 
           }
       }

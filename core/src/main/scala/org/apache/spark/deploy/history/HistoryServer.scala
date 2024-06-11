@@ -17,31 +17,31 @@
 
 package org.apache.spark.deploy.history
 
-import java.util.NoSuchElementException
 import java.util.zip.ZipOutputStream
-import javax.servlet.http.{HttpServlet, HttpServletRequest, HttpServletResponse}
 
 import scala.util.control.NonFatal
 import scala.xml.Node
 
+import jakarta.servlet.http.{HttpServlet, HttpServletRequest, HttpServletResponse}
 import org.eclipse.jetty.servlet.{ServletContextHandler, ServletHolder}
 
 import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.deploy.SparkHadoopUtil
-import org.apache.spark.internal.Logging
+import org.apache.spark.deploy.Utils.addRenderLogHandler
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKeys._
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.History
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.status.api.v1.{ApiRootResource, ApplicationInfo, UIRoot}
 import org.apache.spark.ui.{SparkUI, UIUtils, WebUI}
-import org.apache.spark.ui.JettyUtils._
 import org.apache.spark.util.{ShutdownHookManager, SystemClock, Utils}
 
 /**
  * A web server that renders SparkUIs of completed applications.
  *
  * For the standalone mode, MasterWebUI already achieves this functionality. Thus, the
- * main use case of the HistoryServer is in other deploy modes (e.g. Yarn or Mesos).
+ * main use case of the HistoryServer is in other deploy modes (e.g. Yarn).
  *
  * The logging directory structure is as follows: Within the given base directory, each
  * application's event logs are maintained in the application's own sub-directory. This
@@ -53,7 +53,12 @@ class HistoryServer(
     provider: ApplicationHistoryProvider,
     securityManager: SecurityManager,
     port: Int)
-  extends WebUI(securityManager, securityManager.getSSLOptions("historyServer"), port, conf)
+  extends WebUI(securityManager, securityManager.getSSLOptions("historyServer"),
+    port, conf, name = "HistoryServerUI",
+    // Usually, a History Server stores plenty of event logs for various applications and users
+    // Comparing to Spark LiveUI which is generally for per application usage, it needs more
+    // threads to increase concurrency to handle request from different users and clients.
+    poolSize = 1000)
   with Logging with UIRoot with ApplicationCacheOperations {
 
   // How many applications to retain
@@ -70,23 +75,35 @@ class HistoryServer(
 
   private val loaderServlet = new HttpServlet {
     protected override def doGet(req: HttpServletRequest, res: HttpServletResponse): Unit = {
+
+      res.setContentType("text/html;charset=utf-8")
+
       // Parse the URI created by getAttemptURI(). It contains an app ID and an optional
       // attempt ID (separated by a slash).
       val parts = Option(req.getPathInfo()).getOrElse("").split("/")
       if (parts.length < 2) {
-        res.sendError(HttpServletResponse.SC_BAD_REQUEST,
-          s"Unexpected path info in request (URI = ${req.getRequestURI()}")
-        return
+        res.sendRedirect("/")
       }
 
       val appId = parts(1)
-      val attemptId = if (parts.length >= 3) Some(parts(2)) else None
+      var shouldAppendAttemptId = false
+      val attemptId = if (parts.length >= 3) {
+        Some(parts(2))
+      } else {
+        val lastAttemptId = provider.getApplicationInfo(appId).flatMap(_.attempts.head.attemptId)
+        if (lastAttemptId.isDefined) {
+          shouldAppendAttemptId = true
+          lastAttemptId
+        } else {
+          None
+        }
+      }
 
       // Since we may have applications with multiple attempts mixed with applications with a
       // single attempt, we need to try both. Try the single-attempt route first, and if an
       // error is raised, then try the multiple attempt route.
-      if (!loadAppUi(appId, None) && (!attemptId.isDefined || !loadAppUi(appId, attemptId))) {
-        val msg = <div class="row-fluid">Application {appId} not found.</div>
+      if (!loadAppUi(appId, None) && (attemptId.isEmpty || !loadAppUi(appId, attemptId))) {
+        val msg = <div class="row">Application {appId} not found.</div>
         res.setStatus(HttpServletResponse.SC_NOT_FOUND)
         UIUtils.basicSparkPage(req, msg, "Not Found").foreach { n =>
           res.getWriter().write(n.toString)
@@ -98,8 +115,13 @@ class HistoryServer(
       // the app's UI, and all we need to do is redirect the user to the same URI that was
       // requested, and the proper data should be served at that point.
       // Also, make sure that the redirect url contains the query string present in the request.
-      val requestURI = req.getRequestURI + Option(req.getQueryString).map("?" + _).getOrElse("")
-      res.sendRedirect(res.encodeRedirectURL(requestURI))
+      val redirect = if (shouldAppendAttemptId) {
+        req.getRequestURI.stripSuffix("/") + "/" + attemptId.get + "/"
+      } else {
+        req.getRequestURI.stripSuffix("/") + "/"
+      }
+      val query = Option(req.getQueryString).map("?" + _).getOrElse("")
+      res.sendRedirect(res.encodeRedirectURL(redirect + query))
     }
 
     // SPARK-5983 ensure TRACE is not supported
@@ -112,6 +134,11 @@ class HistoryServer(
     appCache.withSparkUI(appId, attemptId)(fn)
   }
 
+  override def checkUIViewPermissions(appId: String, attemptId: Option[String],
+      user: String): Boolean = {
+    provider.checkUIViewPermissions(appId, attemptId, user)
+  }
+
   initialize()
 
   /**
@@ -120,12 +147,14 @@ class HistoryServer(
    * This starts a background thread that periodically synchronizes information displayed on
    * this UI with the event logs in the provided base directory.
    */
-  def initialize() {
+  def initialize(): Unit = {
     attachPage(new HistoryPage(this))
+    attachPage(new LogPage(conf))
 
     attachHandler(ApiRootResource.getServletHandler(this))
 
     addStaticHandler(SparkUI.STATIC_RESOURCE_DIR)
+    addRenderLogHandler(this, conf)
 
     val contextHandler = new ServletContextHandler
     contextHandler.setContextPath(HistoryServer.UI_PATH_PREFIX)
@@ -134,12 +163,12 @@ class HistoryServer(
   }
 
   /** Bind to the HTTP server behind this web interface. */
-  override def bind() {
+  override def bind(): Unit = {
     super.bind()
   }
 
   /** Stop the server and close the file system. */
-  override def stop() {
+  override def stop(): Unit = {
     super.stop()
     provider.stop()
   }
@@ -149,7 +178,7 @@ class HistoryServer(
       appId: String,
       attemptId: Option[String],
       ui: SparkUI,
-      completed: Boolean) {
+      completed: Boolean): Unit = {
     assert(serverInfo.isDefined, "HistoryServer must be bound before attaching SparkUIs")
     ui.getHandlers.foreach { handler =>
       serverInfo.get.addHandler(handler, ui.securityManager)
@@ -273,16 +302,15 @@ object HistoryServer extends Logging {
     val securityManager = createSecurityManager(conf)
 
     val providerName = conf.get(History.PROVIDER)
-      .getOrElse(classOf[FsHistoryProvider].getName())
-    val provider = Utils.classForName(providerName)
+    val provider = Utils.classForName[ApplicationHistoryProvider](providerName)
       .getConstructor(classOf[SparkConf])
       .newInstance(conf)
-      .asInstanceOf[ApplicationHistoryProvider]
 
     val port = conf.get(History.HISTORY_SERVER_UI_PORT)
 
     val server = new HistoryServer(conf, provider, securityManager, port)
     server.bind()
+    provider.start()
 
     ShutdownHookManager.addShutdownHook { () => server.stop() }
 
@@ -304,15 +332,15 @@ object HistoryServer extends Logging {
     }
 
     if (config.get(ACLS_ENABLE)) {
-      logInfo(s"${ACLS_ENABLE.key} is configured, " +
-        s"clearing it and only using ${History.HISTORY_SERVER_UI_ACLS_ENABLE.key}")
+      logInfo(log"${MDC(KEY, ACLS_ENABLE.key)} is configured, " +
+        log"clearing it and only using ${MDC(KEY2, History.HISTORY_SERVER_UI_ACLS_ENABLE.key)}")
       config.set(ACLS_ENABLE, false)
     }
 
     new SecurityManager(config)
   }
 
-  def initSecurity() {
+  def initSecurity(): Unit = {
     // If we are accessing HDFS and it has security enabled (Kerberos), we have to login
     // from a keytab file so that we can access HDFS beyond the kerberos ticket expiration.
     // As long as it is using Hadoop rpc (hdfs://), a relogin will automatically

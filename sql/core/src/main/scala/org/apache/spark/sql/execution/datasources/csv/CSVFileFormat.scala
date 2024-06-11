@@ -17,16 +17,13 @@
 
 package org.apache.spark.sql.execution.datasources.csv
 
-import java.nio.charset.Charset
-
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.hadoop.mapreduce._
 
-import org.apache.spark.internal.Logging
-import org.apache.spark.sql.{AnalysisException, SparkSession}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.csv.{CSVHeaderChecker, CSVOptions, UnivocityGenerator, UnivocityParser}
+import org.apache.spark.sql.catalyst.csv.{CSVHeaderChecker, CSVOptions, UnivocityParser}
 import org.apache.spark.sql.catalyst.expressions.ExprUtils
 import org.apache.spark.sql.catalyst.util.CompressionCodecs
 import org.apache.spark.sql.execution.datasources._
@@ -103,41 +100,38 @@ class CSVFileFormat extends TextBasedFileFormat with DataSourceRegister {
       hadoopConf: Configuration): (PartitionedFile) => Iterator[InternalRow] = {
     val broadcastedHadoopConf =
       sparkSession.sparkContext.broadcast(new SerializableConfiguration(hadoopConf))
-
     val parsedOptions = new CSVOptions(
       options,
       sparkSession.sessionState.conf.csvColumnPruning,
       sparkSession.sessionState.conf.sessionLocalTimeZone,
       sparkSession.sessionState.conf.columnNameOfCorruptRecord)
+    val isColumnPruningEnabled = parsedOptions.isColumnPruningEnabled(requiredSchema)
 
     // Check a field requirement for corrupt records here to throw an exception in a driver side
     ExprUtils.verifyColumnNameOfCorruptRecord(dataSchema, parsedOptions.columnNameOfCorruptRecord)
-
-    if (requiredSchema.length == 1 &&
-      requiredSchema.head.name == parsedOptions.columnNameOfCorruptRecord) {
-      throw new AnalysisException(
-        "Since Spark 2.3, the queries from raw JSON/CSV files are disallowed when the\n" +
-          "referenced columns only include the internal corrupt record column\n" +
-          s"(named _corrupt_record by default). For example:\n" +
-          "spark.read.schema(schema).csv(file).filter($\"_corrupt_record\".isNotNull).count()\n" +
-          "and spark.read.schema(schema).csv(file).select(\"_corrupt_record\").show().\n" +
-          "Instead, you can cache or save the parsed results and then send the same query.\n" +
-          "For example, val df = spark.read.schema(schema).csv(file).cache() and then\n" +
-          "df.filter($\"_corrupt_record\".isNotNull).count()."
-      )
-    }
-    val columnPruning = sparkSession.sessionState.conf.csvColumnPruning
+    // Don't push any filter which refers to the "virtual" column which cannot present in the input.
+    // Such filters will be applied later on the upper layer.
+    val actualFilters =
+      filters.filterNot(_.references.contains(parsedOptions.columnNameOfCorruptRecord))
 
     (file: PartitionedFile) => {
       val conf = broadcastedHadoopConf.value.value
+      val actualDataSchema = StructType(
+        dataSchema.filterNot(_.name == parsedOptions.columnNameOfCorruptRecord))
+      val actualRequiredSchema = StructType(
+        requiredSchema.filterNot(_.name == parsedOptions.columnNameOfCorruptRecord))
       val parser = new UnivocityParser(
-        StructType(dataSchema.filterNot(_.name == parsedOptions.columnNameOfCorruptRecord)),
-        StructType(requiredSchema.filterNot(_.name == parsedOptions.columnNameOfCorruptRecord)),
-        parsedOptions)
-      val schema = if (columnPruning) requiredSchema else dataSchema
+        actualDataSchema,
+        actualRequiredSchema,
+        parsedOptions,
+        actualFilters)
+      // Use column pruning when specified by Catalyst, except when one or more columns have
+      // existence default value(s), since in that case we instruct the CSV parser to disable column
+      // pruning and instead read each entire row in order to correctly assign the default value(s).
+      val schema = if (isColumnPruningEnabled) actualRequiredSchema else actualDataSchema
       val isStartOfFile = file.start == 0
       val headerChecker = new CSVHeaderChecker(
-        schema, parsedOptions, source = s"CSV file: ${file.filePath}", isStartOfFile)
+        schema, parsedOptions, source = s"CSV file: ${file.urlEncodedPath}", isStartOfFile)
       CSVDataSource(parsedOptions).readFile(
         conf,
         file,
@@ -154,6 +148,10 @@ class CSVFileFormat extends TextBasedFileFormat with DataSourceRegister {
   override def equals(other: Any): Boolean = other.isInstanceOf[CSVFileFormat]
 
   override def supportDataType(dataType: DataType): Boolean = dataType match {
+    case _: VariantType => false
+
+    case _: BinaryType => false
+
     case _: AtomicType => true
 
     case udt: UserDefinedType[_] => supportDataType(udt.sqlType)
@@ -161,33 +159,4 @@ class CSVFileFormat extends TextBasedFileFormat with DataSourceRegister {
     case _ => false
   }
 
-}
-
-private[csv] class CsvOutputWriter(
-    path: String,
-    dataSchema: StructType,
-    context: TaskAttemptContext,
-    params: CSVOptions) extends OutputWriter with Logging {
-
-  private var univocityGenerator: Option[UnivocityGenerator] = None
-
-  if (params.headerFlag) {
-    val gen = getGen()
-    gen.writeHeaders()
-  }
-
-  private def getGen(): UnivocityGenerator = univocityGenerator.getOrElse {
-    val charset = Charset.forName(params.charset)
-    val os = CodecStreams.createOutputStreamWriter(context, new Path(path), charset)
-    val newGen = new UnivocityGenerator(dataSchema, os, params)
-    univocityGenerator = Some(newGen)
-    newGen
-  }
-
-  override def write(row: InternalRow): Unit = {
-    val gen = getGen()
-    gen.write(row)
-  }
-
-  override def close(): Unit = univocityGenerator.foreach(_.close())
 }

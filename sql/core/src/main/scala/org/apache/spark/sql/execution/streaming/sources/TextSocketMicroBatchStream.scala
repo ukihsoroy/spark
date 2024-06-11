@@ -25,13 +25,13 @@ import javax.annotation.concurrent.GuardedBy
 
 import scala.collection.mutable.ListBuffer
 
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKeys.{HOST, PORT}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
+import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
+import org.apache.spark.sql.connector.read.streaming.{MicroBatchStream, Offset}
 import org.apache.spark.sql.execution.streaming.LongOffset
-import org.apache.spark.sql.sources.v2.DataSourceOptions
-import org.apache.spark.sql.sources.v2.reader.{InputPartition, PartitionReader, PartitionReaderFactory}
-import org.apache.spark.sql.sources.v2.reader.streaming.{MicroBatchStream, Offset}
 import org.apache.spark.unsafe.types.UTF8String
 
 /**
@@ -39,8 +39,7 @@ import org.apache.spark.unsafe.types.UTF8String
  * and debugging. This MicroBatchReadSupport will *not* work in production applications due to
  * multiple reasons, including no support for fault recovery.
  */
-class TextSocketMicroBatchStream(
-    host: String, port: Int, numPartitions: Int, options: DataSourceOptions)
+class TextSocketMicroBatchStream(host: String, port: Int, numPartitions: Int)
   extends MicroBatchStream with Logging {
 
   @GuardedBy("this")
@@ -81,13 +80,13 @@ class TextSocketMicroBatchStream(
             val line = reader.readLine()
             if (line == null) {
               // End of file reached
-              logWarning(s"Stream closed by $host:$port")
+              logWarning(log"Stream closed by ${MDC(HOST, host)}:${MDC(PORT, port)}")
               return
             }
             TextSocketMicroBatchStream.this.synchronized {
               val newData = (
                 UTF8String.fromString(line),
-                DateTimeUtils.fromMillis(Calendar.getInstance().getTimeInMillis)
+                DateTimeUtils.millisToMicros(Calendar.getInstance().getTimeInMillis)
               )
               currentOffset += 1
               batches.append(newData)
@@ -132,41 +131,36 @@ class TextSocketMicroBatchStream(
     slices.map(TextSocketInputPartition)
   }
 
-  override def createReaderFactory(): PartitionReaderFactory = {
-    new PartitionReaderFactory {
-      override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
-        val slice = partition.asInstanceOf[TextSocketInputPartition].slice
-        new PartitionReader[InternalRow] {
-          private var currentIdx = -1
+  override def createReaderFactory(): PartitionReaderFactory =
+    (partition: InputPartition) => {
+      val slice = partition.asInstanceOf[TextSocketInputPartition].slice
+      new PartitionReader[InternalRow] {
+        private var currentIdx = -1
 
-          override def next(): Boolean = {
-            currentIdx += 1
-            currentIdx < slice.size
-          }
-
-          override def get(): InternalRow = {
-            InternalRow(slice(currentIdx)._1, slice(currentIdx)._2)
-          }
-
-          override def close(): Unit = {}
+        override def next(): Boolean = {
+          currentIdx += 1
+          currentIdx < slice.size
         }
+
+        override def get(): InternalRow = {
+          InternalRow(slice(currentIdx)._1, slice(currentIdx)._2)
+        }
+
+        override def close(): Unit = {}
       }
     }
-  }
 
   override def commit(end: Offset): Unit = synchronized {
-    val newOffset = LongOffset.convert(end).getOrElse(
-      sys.error(s"TextSocketStream.commit() received an offset ($end) that did not " +
-        s"originate with an instance of this class")
-    )
+    val newOffset = end.asInstanceOf[LongOffset]
 
     val offsetDiff = (newOffset.offset - lastOffsetCommitted.offset).toInt
 
     if (offsetDiff < 0) {
-      sys.error(s"Offsets committed out of order: $lastOffsetCommitted followed by $end")
+      throw new IllegalStateException(
+        s"Offsets committed out of order: $lastOffsetCommitted followed by $end")
     }
 
-    batches.trimStart(offsetDiff)
+    batches.dropInPlace(offsetDiff)
     lastOffsetCommitted = newOffset
   }
 

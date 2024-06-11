@@ -20,6 +20,7 @@ package org.apache.spark.mllib.evaluation
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.mllib.util.MLlibTestSparkContext
 import org.apache.spark.mllib.util.TestingUtils._
+import org.apache.spark.util.ArrayImplicits._
 
 class BinaryClassificationMetricsSuite extends SparkFunSuite with MLlibTestSparkContext {
 
@@ -44,18 +45,18 @@ class BinaryClassificationMetricsSuite extends SparkFunSuite with MLlibTestSpark
       expectedPrecisions: Seq[Double],
       expectedRecalls: Seq[Double]): Unit = {
 
-    assertSequencesMatch(metrics.thresholds().collect(), expectedThresholds)
-    assertTupleSequencesMatch(metrics.roc().collect(), expectedROCCurve)
+    assertSequencesMatch(metrics.thresholds().collect().toImmutableArraySeq, expectedThresholds)
+    assertTupleSequencesMatch(metrics.roc().collect().toImmutableArraySeq, expectedROCCurve)
     assert(metrics.areaUnderROC() ~== AreaUnderCurve.of(expectedROCCurve) absTol 1E-5)
-    assertTupleSequencesMatch(metrics.pr().collect(), expectedPRCurve)
+    assertTupleSequencesMatch(metrics.pr().collect().toImmutableArraySeq, expectedPRCurve)
     assert(metrics.areaUnderPR() ~== AreaUnderCurve.of(expectedPRCurve) absTol 1E-5)
-    assertTupleSequencesMatch(metrics.fMeasureByThreshold().collect(),
+    assertTupleSequencesMatch(metrics.fMeasureByThreshold().collect().toImmutableArraySeq,
       expectedThresholds.zip(expectedFMeasures1))
-    assertTupleSequencesMatch(metrics.fMeasureByThreshold(2.0).collect(),
+    assertTupleSequencesMatch(metrics.fMeasureByThreshold(2.0).collect().toImmutableArraySeq,
       expectedThresholds.zip(expectedFmeasures2))
-    assertTupleSequencesMatch(metrics.precisionByThreshold().collect(),
+    assertTupleSequencesMatch(metrics.precisionByThreshold().collect().toImmutableArraySeq,
       expectedThresholds.zip(expectedPrecisions))
-    assertTupleSequencesMatch(metrics.recallByThreshold().collect(),
+    assertTupleSequencesMatch(metrics.recallByThreshold().collect().toImmutableArraySeq,
       expectedThresholds.zip(expectedRecalls))
   }
 
@@ -183,6 +184,17 @@ class BinaryClassificationMetricsSuite extends SparkFunSuite with MLlibTestSpark
         (1.0, 1.0), (1.0, 1.0)
       ) ==
       downsampledROC)
+
+    val downsampledRecall = downsampled.recallByThreshold().collect().sorted.toList
+    assert(
+      // May have to add 1 if the sample factor didn't divide evenly
+      numBins + (if (scoreAndLabels.size % numBins == 0) 0 else 1) ==
+      downsampledRecall.size)
+    assert(
+      List(
+        (0.1, 1.0), (0.2, 1.0), (0.4, 0.75), (0.6, 0.75), (0.8, 0.25)
+      ) ==
+      downsampledRecall)
   }
 
 }

@@ -2,39 +2,52 @@
 Nested Schema Pruning Benchmark For Parquet
 ================================================================================================
 
-Java HotSpot(TM) 64-Bit Server VM 1.8.0_202-b08 on Mac OS X 10.14.3
-Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz
+OpenJDK 64-Bit Server VM 17.0.11+9-LTS on Linux 6.5.0-1018-azure
+AMD EPYC 7763 64-Core Processor
 Selection:                                Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-Top-level column                                     88            114          16         11.4          87.5       1.0X
-Nested column                                       201            223          27          5.0         200.5       0.4X
+Top-level column                                     75             87          10         13.3          74.9       1.0X
+Nested column                                        72             80           8         13.9          72.0       1.0X
+Nested column in array                              243            248           5          4.1         242.7       0.3X
 
-Java HotSpot(TM) 64-Bit Server VM 1.8.0_202-b08 on Mac OS X 10.14.3
-Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz
+OpenJDK 64-Bit Server VM 17.0.11+9-LTS on Linux 6.5.0-1018-azure
+AMD EPYC 7763 64-Core Processor
 Limiting:                                 Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-Top-level column                                    263            315          36          3.8         263.2       1.0X
-Nested column                                      2111           2622         613          0.5        2111.1       0.1X
+Top-level column                                    251            283          41          4.0         250.7       1.0X
+Nested column                                       258            275          11          3.9         258.5       1.0X
+Nested column in array                              586            622          33          1.7         586.3       0.4X
 
-Java HotSpot(TM) 64-Bit Server VM 1.8.0_202-b08 on Mac OS X 10.14.3
-Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz
+OpenJDK 64-Bit Server VM 17.0.11+9-LTS on Linux 6.5.0-1018-azure
+AMD EPYC 7763 64-Core Processor
 Repartitioning:                           Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-Top-level column                                    222            250          34          4.5         222.2       1.0X
-Nested column                                      2084           2339         266          0.5        2084.2       0.1X
+Top-level column                                    226            234           6          4.4         226.4       1.0X
+Nested column                                       231            240           8          4.3         230.7       1.0X
+Nested column in array                              550            560          18          1.8         549.8       0.4X
 
-Java HotSpot(TM) 64-Bit Server VM 1.8.0_202-b08 on Mac OS X 10.14.3
-Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz
+OpenJDK 64-Bit Server VM 17.0.11+9-LTS on Linux 6.5.0-1018-azure
+AMD EPYC 7763 64-Core Processor
 Repartitioning by exprs:                  Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-Top-level column                                    238            306          96          4.2         238.1       1.0X
-Nested column                                      2080           2373         218          0.5        2079.5       0.1X
+Top-level column                                    224            229           6          4.5         224.1       1.0X
+Nested column                                       252            259           5          4.0         252.0       0.9X
+Nested column in array                              595            604           9          1.7         595.3       0.4X
 
-Java HotSpot(TM) 64-Bit Server VM 1.8.0_202-b08 on Mac OS X 10.14.3
-Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz
+OpenJDK 64-Bit Server VM 17.0.11+9-LTS on Linux 6.5.0-1018-azure
+AMD EPYC 7763 64-Core Processor
+Sample:                                   Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
+------------------------------------------------------------------------------------------------------------------------
+Top-level column                                     75             86           9         13.4          74.8       1.0X
+Nested column                                        76             98          21         13.1          76.4       1.0X
+Nested column in array                              286            300          11          3.5         286.1       0.3X
+
+OpenJDK 64-Bit Server VM 17.0.11+9-LTS on Linux 6.5.0-1018-azure
+AMD EPYC 7763 64-Core Processor
 Sorting:                                  Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-Top-level column                                    328            383          57          3.1         327.6       1.0X
-Nested column                                      2595           3136         638          0.4        2595.1       0.1X
+Top-level column                                    319            333          14          3.1         318.6       1.0X
+Nested column                                       376            388          10          2.7         375.6       0.8X
+Nested column in array                              820            824           5          1.2         819.7       0.4X
 
 

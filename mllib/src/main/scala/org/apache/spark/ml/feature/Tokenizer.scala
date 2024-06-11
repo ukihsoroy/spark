@@ -22,6 +22,7 @@ import org.apache.spark.ml.UnaryTransformer
 import org.apache.spark.ml.param._
 import org.apache.spark.ml.util._
 import org.apache.spark.sql.types.{ArrayType, DataType, StringType}
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * A tokenizer that converts the input string to lowercase and then splits it by white spaces.
@@ -37,7 +38,7 @@ class Tokenizer @Since("1.4.0") (@Since("1.4.0") override val uid: String)
 
   override protected def createTransformFunc: String => Seq[String] = {
     // scalastyle:off caselocale
-    _.toLowerCase.split("\\s")
+    _.toLowerCase.split("\\s").toImmutableArraySeq
     // scalastyle:on caselocale
   }
 
@@ -145,7 +146,7 @@ class RegexTokenizer @Since("1.4.0") (@Since("1.4.0") override val uid: String)
     // scalastyle:off caselocale
     val str = if ($(toLowercase)) originStr.toLowerCase() else originStr
     // scalastyle:on caselocale
-    val tokens = if ($(gaps)) re.split(str).toSeq else re.findAllIn(str).toSeq
+    val tokens = if ($(gaps)) re.split(str).toImmutableArraySeq else re.findAllIn(str).toSeq
     val minLength = $(minTokenLength)
     tokens.filter(_.length >= minLength)
   }
@@ -158,6 +159,12 @@ class RegexTokenizer @Since("1.4.0") (@Since("1.4.0") override val uid: String)
 
   @Since("1.4.1")
   override def copy(extra: ParamMap): RegexTokenizer = defaultCopy(extra)
+
+  @Since("3.0.0")
+  override def toString: String = {
+    s"RegexTokenizer: uid=$uid, minTokenLength=${$(minTokenLength)}, gaps=${$(gaps)}, " +
+      s"pattern=${$(pattern)}, toLowercase=${$(toLowercase)}"
+  }
 }
 
 @Since("1.6.0")

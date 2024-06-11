@@ -31,11 +31,6 @@ class CommandBuilderUtils {
   static final String DEFAULT_PROPERTIES_FILE = "spark-defaults.conf";
   static final String ENV_SPARK_HOME = "SPARK_HOME";
 
-  /** The set of known JVM vendors. */
-  enum JavaVendor {
-    Oracle, IBM, OpenJDK, Unknown
-  }
-
   /** Returns whether the given string is null or empty. */
   static boolean isEmpty(String s) {
     return s == null || s.isEmpty();
@@ -112,21 +107,6 @@ class CommandBuilderUtils {
     return os.startsWith("Windows");
   }
 
-  /** Returns an enum value indicating whose JVM is being used. */
-  static JavaVendor getJavaVendor() {
-    String vendorString = System.getProperty("java.vendor");
-    if (vendorString.contains("Oracle")) {
-      return JavaVendor.Oracle;
-    }
-    if (vendorString.contains("IBM")) {
-      return JavaVendor.IBM;
-    }
-    if (vendorString.contains("OpenJDK")) {
-      return JavaVendor.OpenJDK;
-    }
-    return JavaVendor.Unknown;
-  }
-
   /**
    * Updates the user environment, appending the given pathList to the existing value of the given
    * environment variable (or setting it if it hasn't yet been set).
@@ -163,59 +143,61 @@ class CommandBuilderUtils {
         escapeNext = false;
       } else if (inOpt) {
         switch (c) {
-        case '\\':
-          if (inSingleQuote) {
-            opt.appendCodePoint(c);
-          } else {
-            escapeNext = true;
+          case '\\' -> {
+            if (inSingleQuote) {
+              opt.appendCodePoint(c);
+            } else {
+              escapeNext = true;
+            }
           }
-          break;
-        case '\'':
-          if (inDoubleQuote) {
-            opt.appendCodePoint(c);
-          } else {
-            inSingleQuote = !inSingleQuote;
+          case '\'' -> {
+            if (inDoubleQuote) {
+              opt.appendCodePoint(c);
+            } else {
+              inSingleQuote = !inSingleQuote;
+            }
           }
-          break;
-        case '"':
-          if (inSingleQuote) {
-            opt.appendCodePoint(c);
-          } else {
-            inDoubleQuote = !inDoubleQuote;
+          case '"' -> {
+            if (inSingleQuote) {
+              opt.appendCodePoint(c);
+            } else {
+              inDoubleQuote = !inDoubleQuote;
+            }
           }
-          break;
-        default:
-          if (!Character.isWhitespace(c) || inSingleQuote || inDoubleQuote) {
-            opt.appendCodePoint(c);
-          } else {
-            opts.add(opt.toString());
-            opt.setLength(0);
-            inOpt = false;
-            hasData = false;
+          default -> {
+            if (!Character.isWhitespace(c) || inSingleQuote || inDoubleQuote) {
+              opt.appendCodePoint(c);
+            } else {
+              opts.add(opt.toString());
+              opt.setLength(0);
+              inOpt = false;
+              hasData = false;
+            }
           }
         }
       } else {
         switch (c) {
-        case '\'':
-          inSingleQuote = true;
-          inOpt = true;
-          hasData = true;
-          break;
-        case '"':
-          inDoubleQuote = true;
-          inOpt = true;
-          hasData = true;
-          break;
-        case '\\':
-          escapeNext = true;
-          inOpt = true;
-          hasData = true;
-          break;
-        default:
-          if (!Character.isWhitespace(c)) {
+          case '\'' -> {
+            inSingleQuote = true;
             inOpt = true;
             hasData = true;
-            opt.appendCodePoint(c);
+          }
+          case '"' -> {
+            inDoubleQuote = true;
+            inOpt = true;
+            hasData = true;
+          }
+          case '\\' -> {
+            escapeNext = true;
+            inOpt = true;
+            hasData = true;
+          }
+          default -> {
+            if (!Character.isWhitespace(c)) {
+              inOpt = true;
+              hasData = true;
+              opt.appendCodePoint(c);
+            }
           }
         }
       }
@@ -276,12 +258,8 @@ class CommandBuilderUtils {
     for (int i = 0; i < arg.length(); i++) {
       int cp = arg.codePointAt(i);
       switch (cp) {
-      case '"':
-        quoted.append('"');
-        break;
-
-      default:
-        break;
+        case '"' -> quoted.append('"');
+        default -> {}
       }
       quoted.appendCodePoint(cp);
     }

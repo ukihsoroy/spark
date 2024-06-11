@@ -18,7 +18,7 @@
 package org.apache.spark.sql.execution.columnar
 
 import org.apache.spark.SparkFunSuite
-import org.apache.spark.sql.types._
+import org.apache.spark.sql.catalyst.types.PhysicalDataType
 
 class ColumnStatsSuite extends SparkFunSuite {
   testColumnStats(classOf[BooleanColumnStats], BOOLEAN, Array(true, false, 0))
@@ -30,8 +30,9 @@ class ColumnStatsSuite extends SparkFunSuite {
   testColumnStats(classOf[DoubleColumnStats], DOUBLE, Array(Double.MaxValue, Double.MinValue, 0))
   testColumnStats(classOf[StringColumnStats], STRING, Array(null, null, 0))
   testDecimalColumnStats(Array(null, null, 0))
+  testIntervalColumnStats(Array(null, null, 0))
 
-  def testColumnStats[T <: AtomicType, U <: ColumnStats](
+  def testColumnStats[T <: PhysicalDataType, U <: ColumnStats](
       columnStatsClass: Class[U],
       columnType: NativeColumnType[T],
       initialStatistics: Array[Any]): Unit = {
@@ -52,8 +53,11 @@ class ColumnStatsSuite extends SparkFunSuite {
       val rows = Seq.fill(10)(makeRandomRow(columnType)) ++ Seq.fill(10)(makeNullRow(1))
       rows.foreach(columnStats.gatherStats(_, 0))
 
-      val values = rows.take(10).map(_.get(0, columnType.dataType).asInstanceOf[T#InternalType])
-      val ordering = columnType.dataType.ordering.asInstanceOf[Ordering[T#InternalType]]
+      val values = rows.take(10).map(_.get(
+        0, ColumnarDataTypeUtils.toLogicalDataType(columnType.dataType))
+        .asInstanceOf[T#InternalType])
+      val ordering = PhysicalDataType.ordering(
+        ColumnarDataTypeUtils.toLogicalDataType(columnType.dataType))
       val stats = columnStats.collectedStatistics
 
       assertResult(values.min(ordering), "Wrong lower bound")(stats(0))
@@ -68,7 +72,7 @@ class ColumnStatsSuite extends SparkFunSuite {
     }
   }
 
-  def testDecimalColumnStats[T <: AtomicType, U <: ColumnStats](
+  def testDecimalColumnStats[T <: PhysicalDataType, U <: ColumnStats](
       initialStatistics: Array[Any]): Unit = {
 
     val columnStatsName = classOf[DecimalColumnStats].getSimpleName
@@ -88,12 +92,46 @@ class ColumnStatsSuite extends SparkFunSuite {
       val rows = Seq.fill(10)(makeRandomRow(columnType)) ++ Seq.fill(10)(makeNullRow(1))
       rows.foreach(columnStats.gatherStats(_, 0))
 
-      val values = rows.take(10).map(_.get(0, columnType.dataType).asInstanceOf[T#InternalType])
-      val ordering = columnType.dataType.ordering.asInstanceOf[Ordering[T#InternalType]]
+      val values = rows.take(10).map(_.get(0,
+        ColumnarDataTypeUtils.toLogicalDataType(columnType.dataType)))
+      val ordering = PhysicalDataType.ordering(
+        ColumnarDataTypeUtils.toLogicalDataType(columnType.dataType))
       val stats = columnStats.collectedStatistics
 
       assertResult(values.min(ordering), "Wrong lower bound")(stats(0))
       assertResult(values.max(ordering), "Wrong upper bound")(stats(1))
+      assertResult(10, "Wrong null count")(stats(2))
+      assertResult(20, "Wrong row count")(stats(3))
+      assertResult(stats(4), "Wrong size in bytes") {
+        rows.map { row =>
+          if (row.isNullAt(0)) 4 else columnType.actualSize(row, 0)
+        }.sum
+      }
+    }
+  }
+
+  def testIntervalColumnStats[T <: PhysicalDataType, U <: ColumnStats](
+      initialStatistics: Array[Any]): Unit = {
+
+    val columnStatsName = classOf[IntervalColumnStats].getSimpleName
+    val columnType = CALENDAR_INTERVAL
+
+    test(s"$columnStatsName: empty") {
+      val columnStats = new IntervalColumnStats
+      columnStats.collectedStatistics.zip(initialStatistics).foreach {
+        case (actual, expected) => assert(actual === expected)
+      }
+    }
+
+    test(s"$columnStatsName: non-empty") {
+      import org.apache.spark.sql.execution.columnar.ColumnarTestUtils._
+
+      val columnStats = new IntervalColumnStats
+      val rows = Seq.fill(10)(makeRandomRow(columnType)) ++ Seq.fill(10)(makeNullRow(1))
+      rows.foreach(columnStats.gatherStats(_, 0))
+
+      val stats = columnStats.collectedStatistics
+
       assertResult(10, "Wrong null count")(stats(2))
       assertResult(20, "Wrong row count")(stats(3))
       assertResult(stats(4), "Wrong size in bytes") {

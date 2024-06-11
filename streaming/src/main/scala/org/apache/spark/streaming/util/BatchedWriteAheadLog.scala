@@ -22,14 +22,15 @@ import java.util.{Iterator => JIterator}
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.Promise
 import scala.concurrent.duration._
+import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 import org.apache.spark.SparkConf
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKeys.RECORDS
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.util.{ThreadUtils, Utils}
 
@@ -135,18 +136,16 @@ private[util] class BatchedWriteAheadLog(val wrappedLog: WriteAheadLog, conf: Sp
 
   /** Start the actual log writer on a separate thread. */
   private def startBatchedWriterThread(): Thread = {
-    val thread = new Thread(new Runnable {
-      override def run(): Unit = {
-        while (active.get()) {
-          try {
-            flushRecords()
-          } catch {
-            case NonFatal(e) =>
-              logWarning("Encountered exception in Batched Writer Thread.", e)
-          }
+    val thread = new Thread(() => {
+      while (active.get()) {
+        try {
+          flushRecords()
+        } catch {
+          case NonFatal(e) =>
+            logWarning("Encountered exception in Batched Writer Thread.", e)
         }
-        logInfo("BatchedWriteAheadLog Writer thread exiting.")
       }
+      logInfo("BatchedWriteAheadLog Writer thread exiting.")
     }, "BatchedWriteAheadLog Writer")
     thread.setDaemon(true)
     thread.start()
@@ -172,7 +171,7 @@ private[util] class BatchedWriteAheadLog(val wrappedLog: WriteAheadLog, conf: Sp
         // We take the latest record for the timestamp. Please refer to the class Javadoc for
         // detailed explanation
         val time = sortedByTime.last.time
-        segment = wrappedLog.write(aggregate(sortedByTime), time)
+        segment = wrappedLog.write(aggregate(sortedByTime.toSeq), time)
       }
       buffer.foreach(_.promise.success(segment))
     } catch {
@@ -180,7 +179,7 @@ private[util] class BatchedWriteAheadLog(val wrappedLog: WriteAheadLog, conf: Sp
         logWarning("BatchedWriteAheadLog Writer queue interrupted.", e)
         buffer.foreach(_.promise.failure(e))
       case NonFatal(e) =>
-        logWarning(s"BatchedWriteAheadLog Writer failed to write $buffer", e)
+        logWarning(log"BatchedWriteAheadLog Writer failed to write ${MDC(RECORDS, buffer)}", e)
         buffer.foreach(_.promise.failure(e))
     } finally {
       buffer.clear()

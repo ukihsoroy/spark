@@ -17,13 +17,21 @@
 
 package org.apache.spark.sql.util;
 
-import org.apache.spark.annotation.Experimental;
-
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+
+import org.apache.spark.annotation.Experimental;
+import org.apache.spark.internal.SparkLogger;
+import org.apache.spark.internal.SparkLoggerFactory;
+import org.apache.spark.internal.LogKeys;
+import org.apache.spark.internal.MDC;
+import org.apache.spark.SparkIllegalArgumentException;
+import org.apache.spark.SparkUnsupportedOperationException;
 
 /**
  * Case-insensitive map of string keys to string values.
@@ -31,19 +39,34 @@ import java.util.Set;
  * This is used to pass options to v2 implementations to ensure consistent case insensitivity.
  * <p>
  * Methods that return keys in this map, like {@link #entrySet()} and {@link #keySet()}, return
- * keys converted to lower case.
+ * keys converted to lower case. This map doesn't allow null key.
+ *
+ * @since 3.0.0
  */
 @Experimental
 public class CaseInsensitiveStringMap implements Map<String, String> {
+  private static final SparkLogger logger =
+    SparkLoggerFactory.getLogger(CaseInsensitiveStringMap.class);
 
   public static CaseInsensitiveStringMap empty() {
-    return new CaseInsensitiveStringMap();
+    return new CaseInsensitiveStringMap(new HashMap<>(0));
   }
+
+  private final Map<String, String> original;
 
   private final Map<String, String> delegate;
 
-  private CaseInsensitiveStringMap() {
-    this.delegate = new HashMap<>();
+  public CaseInsensitiveStringMap(Map<String, String> originalMap) {
+    original = new HashMap<>(originalMap);
+    delegate = new HashMap<>(originalMap.size());
+    for (Map.Entry<String, String> entry : originalMap.entrySet()) {
+      String key = toLowerCase(entry.getKey());
+      if (delegate.containsKey(key)) {
+        logger.warn("Converting duplicated key {} into CaseInsensitiveStringMap.",
+          MDC.of(LogKeys.KEY$.MODULE$, entry.getKey()));
+      }
+      delegate.put(key, entry.getValue());
+    }
   }
 
   @Override
@@ -56,9 +79,13 @@ public class CaseInsensitiveStringMap implements Map<String, String> {
     return delegate.isEmpty();
   }
 
+  private String toLowerCase(Object key) {
+    return key.toString().toLowerCase(Locale.ROOT);
+  }
+
   @Override
   public boolean containsKey(Object key) {
-    return delegate.containsKey(key.toString().toLowerCase(Locale.ROOT));
+    return delegate.containsKey(toLowerCase(key));
   }
 
   @Override
@@ -68,29 +95,27 @@ public class CaseInsensitiveStringMap implements Map<String, String> {
 
   @Override
   public String get(Object key) {
-    return delegate.get(key.toString().toLowerCase(Locale.ROOT));
+    return delegate.get(toLowerCase(key));
   }
 
   @Override
   public String put(String key, String value) {
-    return delegate.put(key.toLowerCase(Locale.ROOT), value);
+    throw new SparkUnsupportedOperationException("_LEGACY_ERROR_TEMP_3132");
   }
 
   @Override
   public String remove(Object key) {
-    return delegate.remove(key.toString().toLowerCase(Locale.ROOT));
+    throw new SparkUnsupportedOperationException("_LEGACY_ERROR_TEMP_3132");
   }
 
   @Override
   public void putAll(Map<? extends String, ? extends String> m) {
-    for (Map.Entry<? extends String, ? extends String> entry : m.entrySet()) {
-      put(entry.getKey(), entry.getValue());
-    }
+    throw new SparkUnsupportedOperationException("_LEGACY_ERROR_TEMP_3132");
   }
 
   @Override
   public void clear() {
-    delegate.clear();
+    throw new SparkUnsupportedOperationException("_LEGACY_ERROR_TEMP_3132");
   }
 
   @Override
@@ -106,5 +131,74 @@ public class CaseInsensitiveStringMap implements Map<String, String> {
   @Override
   public Set<Map.Entry<String, String>> entrySet() {
     return delegate.entrySet();
+  }
+
+  /**
+   * Returns the boolean value to which the specified key is mapped,
+   * or defaultValue if there is no mapping for the key. The key match is case-insensitive.
+   */
+  public boolean getBoolean(String key, boolean defaultValue) {
+    String value = get(key);
+    // We can't use `Boolean.parseBoolean` here, as it returns false for invalid strings.
+    if (value == null) {
+      return defaultValue;
+    } else if (value.equalsIgnoreCase("true")) {
+      return true;
+    } else if (value.equalsIgnoreCase("false")) {
+      return false;
+    } else {
+      throw new SparkIllegalArgumentException("_LEGACY_ERROR_TEMP_3206", Map.of("value", value));
+    }
+  }
+
+  /**
+   * Returns the integer value to which the specified key is mapped,
+   * or defaultValue if there is no mapping for the key. The key match is case-insensitive.
+   */
+  public int getInt(String key, int defaultValue) {
+    String value = get(key);
+    return value == null ? defaultValue : Integer.parseInt(value);
+  }
+
+  /**
+   * Returns the long value to which the specified key is mapped,
+   * or defaultValue if there is no mapping for the key. The key match is case-insensitive.
+   */
+  public long getLong(String key, long defaultValue) {
+    String value = get(key);
+    return value == null ? defaultValue : Long.parseLong(value);
+  }
+
+  /**
+   * Returns the double value to which the specified key is mapped,
+   * or defaultValue if there is no mapping for the key. The key match is case-insensitive.
+   */
+  public double getDouble(String key, double defaultValue) {
+    String value = get(key);
+    return value == null ? defaultValue : Double.parseDouble(value);
+  }
+
+  /**
+   * Returns the original case-sensitive map.
+   */
+  public Map<String, String> asCaseSensitiveMap() {
+    return Collections.unmodifiableMap(original);
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    CaseInsensitiveStringMap that = (CaseInsensitiveStringMap) o;
+    return delegate.equals(that.delegate);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(delegate);
   }
 }

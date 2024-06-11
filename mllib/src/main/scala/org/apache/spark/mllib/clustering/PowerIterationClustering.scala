@@ -25,7 +25,8 @@ import org.apache.spark.{SparkContext, SparkException}
 import org.apache.spark.annotation.Since
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.graphx._
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKeys.{DELTA, DIFF_DELTA, NORM, NUM_ITERATIONS}
 import org.apache.spark.mllib.linalg.Vectors
 import org.apache.spark.mllib.util.{Loader, MLUtils, Saveable}
 import org.apache.spark.rdd.RDD
@@ -79,7 +80,7 @@ object PowerIterationClusteringModel extends Loader[PowerIterationClusteringMode
 
     @Since("1.4.0")
     def load(sc: SparkContext, path: String): PowerIterationClusteringModel = {
-      implicit val formats = DefaultFormats
+      implicit val formats: Formats = DefaultFormats
       val spark = SparkSession.builder().sparkContext(sc).getOrCreate()
 
       val (className, formatVersion, metadata) = Loader.loadMetadata(sc, path)
@@ -183,6 +184,8 @@ class PowerIterationClustering private[clustering] (
       case "random" => randomInit(w)
       case "degree" => initDegreeVector(w)
     }
+    // Materialized the graph w0 in randomInit/initDegreeVector, hence we can unpersist w.
+    w.unpersist()
     pic(w0)
   }
 
@@ -205,6 +208,8 @@ class PowerIterationClustering private[clustering] (
       case "random" => randomInit(w)
       case "degree" => initDegreeVector(w)
     }
+    // Materialized the graph w0 in randomInit/initDegreeVector, hence we can unpersist w.
+    w.unpersist()
     pic(w0)
   }
 
@@ -226,11 +231,10 @@ class PowerIterationClustering private[clustering] (
    */
   private def pic(w: Graph[Double, Double]): PowerIterationClusteringModel = {
     val v = powerIter(w, maxIterations)
-    val assignments = kMeans(v, k).mapPartitions({ iter =>
-      iter.map { case (id, cluster) =>
-        Assignment(id, cluster)
-      }
-    }, preservesPartitioning = true)
+    val assignments = kMeans(v, k).map {
+      case (id, cluster) => Assignment(id, cluster)
+    }
+
     new PowerIterationClusteringModel(k, assignments)
   }
 }
@@ -296,12 +300,15 @@ object PowerIterationClustering extends Logging {
       },
       mergeMsg = _ + _,
       TripletFields.EdgeOnly)
-    Graph(vD, gA.edges)
-      .mapTriplets(
-        e => e.attr / math.max(e.srcAttr, MLUtils.EPSILON),
-        new TripletFields(/* useSrc */ true,
-                          /* useDst */ false,
-                          /* useEdge */ true))
+    val graph = Graph(vD, gA.edges).mapTriplets(
+      e => e.attr / math.max(e.srcAttr, MLUtils.EPSILON),
+      new TripletFields(/* useSrc */ true,
+        /* useDst */ false,
+        /* useEdge */ true))
+    materialize(graph)
+    gA.unpersist()
+
+    graph
   }
 
   /**
@@ -322,7 +329,10 @@ object PowerIterationClustering extends Logging {
       }, preservesPartitioning = true).cache()
     val sum = r.values.map(math.abs).sum()
     val v0 = r.mapValues(x => x / sum)
-    Graph(VertexRDD(v0), g.edges)
+    val graph = Graph(VertexRDD(v0), g.edges)
+    materialize(graph)
+    r.unpersist()
+    graph
   }
 
   /**
@@ -337,7 +347,9 @@ object PowerIterationClustering extends Logging {
   def initDegreeVector(g: Graph[Double, Double]): Graph[Double, Double] = {
     val sum = g.vertices.values.sum()
     val v0 = g.vertices.mapValues(_ / sum)
-    Graph(VertexRDD(v0), g.edges)
+    val graph = Graph(VertexRDD(v0), g.edges)
+    materialize(graph)
+    graph
   }
 
   /**
@@ -357,7 +369,7 @@ object PowerIterationClustering extends Logging {
     var diffDelta = Double.MaxValue
     var curG = g
     for (iter <- 0 until maxIterations if math.abs(diffDelta) > tol) {
-      val msgPrefix = s"Iteration $iter"
+      val msgPrefix = log"Iteration ${MDC(NUM_ITERATIONS, iter)}:"
       // multiply W by vt
       val v = curG.aggregateMessages[Double](
         sendMsg = ctx => ctx.sendToSrc(ctx.attr * ctx.dstAttr),
@@ -367,15 +379,15 @@ object PowerIterationClustering extends Logging {
                           /* useEdge */ true)).cache()
       // normalize v
       val norm = v.values.map(math.abs).sum()
-      logInfo(s"$msgPrefix: norm(v) = $norm.")
+      logInfo(msgPrefix + log" norm(v) = ${MDC(NORM, norm)}.")
       val v1 = v.mapValues(x => x / norm)
       // compare difference
       val delta = curG.joinVertices(v1) { case (_, x, y) =>
         math.abs(x - y)
       }.vertices.values.sum()
-      logInfo(s"$msgPrefix: delta = $delta.")
+      logInfo(msgPrefix + log" delta = ${MDC(DELTA, delta)}.")
       diffDelta = math.abs(delta - prevDelta)
-      logInfo(s"$msgPrefix: diff(delta) = $diffDelta.")
+      logInfo(msgPrefix + log" diff(delta) = ${MDC(DIFF_DELTA, diffDelta)}.")
 
       if (math.abs(diffDelta) < tol) {
         /**
@@ -393,14 +405,21 @@ object PowerIterationClustering extends Logging {
         val rayleigh = xTAx / xTx
 
         if (math.abs(norm - math.abs(rayleigh)) > tol) {
-          logWarning(s"Power Iteration fail to converge. delta = ${delta}," +
-            s" difference delta = ${diffDelta} and norm = ${norm}")
+          logWarning(log"Power Iteration fail to converge. delta = ${MDC(DELTA, delta)}," +
+            log" difference delta = ${MDC(DIFF_DELTA, diffDelta)} and norm = ${MDC(NORM, norm)}")
         }
       }
+      curG.vertices.unpersist()
+      curG.edges.unpersist()
       // update v
       curG = Graph(VertexRDD(v1), g.edges)
+      materialize(curG)
+      v.unpersist()
       prevDelta = delta
     }
+
+    curG.edges.unpersist()
+
     curG.vertices
   }
 
@@ -412,11 +431,21 @@ object PowerIterationClustering extends Logging {
    */
   private[clustering]
   def kMeans(v: VertexRDD[Double], k: Int): VertexRDD[Int] = {
-    val points = v.mapValues(x => Vectors.dense(x)).cache()
+    val points = v.mapValues(Vectors.dense(_)).cache()
     val model = new KMeans()
       .setK(k)
       .setSeed(0L)
       .run(points.values)
-    points.mapValues(p => model.predict(p)).cache()
+
+    val predict = points.mapValues(model.predict(_))
+    points.unpersist()
+    predict
+  }
+
+  /**
+   * Forces materialization of a Graph by iterating its RDDs.
+   */
+  private def materialize(g: Graph[_, _]): Unit = {
+    g.edges.foreachPartition(_ => {})
   }
 }

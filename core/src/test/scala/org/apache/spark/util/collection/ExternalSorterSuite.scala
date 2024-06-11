@@ -17,8 +17,6 @@
 
 package org.apache.spark.util.collection
 
-import java.util.Comparator
-
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
@@ -111,14 +109,9 @@ class ExternalSorterSuite extends SparkFunSuite with LocalSparkContext {
     val tmp = new Array[Long](size/2)
     val tmpBuf = new LongArray(MemoryBlock.fromLongArray(tmp))
 
-    new Sorter(new UnsafeSortDataFormat(tmpBuf)).sort(
-      buf, 0, size, new Comparator[RecordPointerAndKeyPrefix] {
-        override def compare(
-            r1: RecordPointerAndKeyPrefix,
-            r2: RecordPointerAndKeyPrefix): Int = {
-          PrefixComparators.LONG.compare(r1.keyPrefix, r2.keyPrefix)
-        }
-      })
+    new Sorter(new UnsafeSortDataFormat(tmpBuf)).sort(buf, 0, size,
+      (r1: RecordPointerAndKeyPrefix, r2: RecordPointerAndKeyPrefix) =>
+        PrefixComparators.LONG.compare(r1.keyPrefix, r2.keyPrefix))
   }
 
   test("spilling with hash collisions") {
@@ -135,7 +128,7 @@ class ExternalSorterSuite extends SparkFunSuite with LocalSparkContext {
         buffer2: ArrayBuffer[String]): ArrayBuffer[String] = buffer1 ++= buffer2
 
     val agg = new Aggregator[String, String, ArrayBuffer[String]](
-      createCombiner _, mergeValue _, mergeCombiners _)
+      createCombiner, mergeValue, mergeCombiners)
 
     val sorter = new ExternalSorter[String, String, ArrayBuffer[String]](
       context, Some(agg), None, None)
@@ -301,7 +294,7 @@ class ExternalSorterSuite extends SparkFunSuite with LocalSparkContext {
    |  Helper methods that contain the test body  |
    * =========================================== */
 
-  private def emptyDataStream(conf: SparkConf) {
+  private def emptyDataStream(conf: SparkConf): Unit = {
     conf.set(SHUFFLE_MANAGER, "sort")
     sc = new SparkContext("local", "test", conf)
     val context = MemoryTestingUtils.fakeTaskContext(sc.env)
@@ -334,7 +327,7 @@ class ExternalSorterSuite extends SparkFunSuite with LocalSparkContext {
     sorter4.stop()
   }
 
-  private def fewElementsPerPartition(conf: SparkConf) {
+  private def fewElementsPerPartition(conf: SparkConf): Unit = {
     conf.set(SHUFFLE_MANAGER, "sort")
     sc = new SparkContext("local", "test", conf)
     val context = MemoryTestingUtils.fakeTaskContext(sc.env)
@@ -375,7 +368,7 @@ class ExternalSorterSuite extends SparkFunSuite with LocalSparkContext {
     sorter4.stop()
   }
 
-  private def emptyPartitionsWithSpilling(conf: SparkConf) {
+  private def emptyPartitionsWithSpilling(conf: SparkConf): Unit = {
     val size = 1000
     conf.set(SHUFFLE_MANAGER, "sort")
     conf.set(SHUFFLE_SPILL_NUM_ELEMENTS_FORCE_SPILL_THRESHOLD, size / 2)
@@ -400,7 +393,7 @@ class ExternalSorterSuite extends SparkFunSuite with LocalSparkContext {
     sorter.stop()
   }
 
-  private def testSpillingInLocalCluster(conf: SparkConf, numReduceTasks: Int) {
+  private def testSpillingInLocalCluster(conf: SparkConf, numReduceTasks: Int): Unit = {
     val size = 5000
     conf.set(SHUFFLE_MANAGER, "sort")
     conf.set(SHUFFLE_SPILL_NUM_ELEMENTS_FORCE_SPILL_THRESHOLD, size / 4)
@@ -507,15 +500,15 @@ class ExternalSorterSuite extends SparkFunSuite with LocalSparkContext {
         intercept[SparkException] {
           data.reduceByKey(_ + _).count()
         }
-        // After the shuffle, there should be only 2 files on disk: the output of task 1 and
-        // its index. All other files (map 2's output and intermediate merge files) should
-        // have been deleted.
-        assert(diskBlockManager.getAllFiles().length === 2)
+        // After the shuffle, there should be only 3 files on disk: the output of task 1 and
+        // its index and checksum. All other files (map 2's output and intermediate merge files)
+        // should have been deleted.
+        assert(diskBlockManager.getAllFiles().length === 3)
       } else {
         assert(data.reduceByKey(_ + _).count() === size)
-        // After the shuffle, there should be only 4 files on disk: the output of both tasks
-        // and their indices. All intermediate merge files should have been deleted.
-        assert(diskBlockManager.getAllFiles().length === 4)
+        // After the shuffle, there should be only 6 files on disk: the output of both tasks
+        // and their indices/checksums. All intermediate merge files should have been deleted.
+        assert(diskBlockManager.getAllFiles().length === 6)
       }
     }
   }
@@ -524,7 +517,7 @@ class ExternalSorterSuite extends SparkFunSuite with LocalSparkContext {
       conf: SparkConf,
       withPartialAgg: Boolean,
       withOrdering: Boolean,
-      withSpilling: Boolean) {
+      withSpilling: Boolean): Unit = {
     val size = 1000
     if (withSpilling) {
       conf.set(SHUFFLE_SPILL_NUM_ELEMENTS_FORCE_SPILL_THRESHOLD, size / 2)
@@ -551,14 +544,14 @@ class ExternalSorterSuite extends SparkFunSuite with LocalSparkContext {
     val expected = (0 until 3).map { p =>
       var v = (0 until size).map { i => (i / 4, i) }.filter { case (k, _) => k % 3 == p }.toSet
       if (withPartialAgg) {
-        v = v.groupBy(_._1).mapValues { s => s.map(_._2).sum }.toSet
+        v = v.groupBy(_._1).transform((_, s) => s.map(_._2).sum).toSet
       }
       (p, v.toSet)
     }.toSet
     assert(results === expected)
   }
 
-  private def sortWithoutBreakingSortingContracts(conf: SparkConf) {
+  private def sortWithoutBreakingSortingContracts(conf: SparkConf): Unit = {
     val size = 100000
     val conf = createSparkConf(loadDefaults = true, kryo = false)
     conf.set(SHUFFLE_MANAGER, "sort")

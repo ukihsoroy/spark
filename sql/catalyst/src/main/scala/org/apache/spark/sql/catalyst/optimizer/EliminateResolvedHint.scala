@@ -17,43 +17,84 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
+import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
+import org.apache.spark.sql.catalyst.trees.TreePattern.PLAN_EXPRESSION
+import org.apache.spark.sql.internal.SQLConf
 
 /**
  * Replaces [[ResolvedHint]] operators from the plan. Move the [[HintInfo]] to associated [[Join]]
  * operators, otherwise remove it if no [[Join]] operator is matched.
  */
 object EliminateResolvedHint extends Rule[LogicalPlan] {
+
+  private val hintErrorHandler = conf.hintErrorHandler
+
   // This is also called in the beginning of the optimization phase, and as a result
   // is using transformUp rather than resolveOperators.
   def apply(plan: LogicalPlan): LogicalPlan = {
-    val pulledUp = plan transformUp {
-      case j: Join =>
-        val leftHint = mergeHints(collectHints(j.left))
-        val rightHint = mergeHints(collectHints(j.right))
-        j.copy(hint = JoinHint(leftHint, rightHint))
+    val joinsWithHints = plan transformUp {
+      case j: Join if j.hint == JoinHint.NONE =>
+        val (newLeft, leftHints) = extractHintsFromPlan(j.left)
+        val (newRight, rightHints) = extractHintsFromPlan(j.right)
+        val newJoinHint = JoinHint(mergeHints(leftHints), mergeHints(rightHints))
+        j.copy(left = newLeft, right = newRight, hint = newJoinHint)
     }
-    pulledUp.transformUp {
-      case h: ResolvedHint => h.child
+    val shouldPullHintsIntoSubqueries = SQLConf.get.getConf(SQLConf.PULL_HINTS_INTO_SUBQUERIES)
+    val joinsAndSubqueriesWithHints = if (shouldPullHintsIntoSubqueries) {
+      pullHintsIntoSubqueries(joinsWithHints)
+    } else {
+      joinsWithHints
+    }
+    joinsAndSubqueriesWithHints.transformUp {
+      case h: ResolvedHint =>
+        hintErrorHandler.joinNotFoundForJoinHint(h.hints)
+        h.child
     }
   }
 
+  def pullHintsIntoSubqueries(plan: LogicalPlan): LogicalPlan = {
+    plan.transformAllExpressionsWithPruning(_.containsPattern(PLAN_EXPRESSION)) {
+      case s: SubqueryExpression if s.hint.isEmpty =>
+        val (newPlan, subqueryHints) = extractHintsFromPlan(s.plan)
+        val newHint = mergeHints(subqueryHints)
+        s.withNewPlan(newPlan).withNewHint(newHint)
+    }
+  }
+
+  /**
+   * Combine a list of [[HintInfo]]s into one [[HintInfo]].
+   */
   private def mergeHints(hints: Seq[HintInfo]): Option[HintInfo] = {
-    hints.reduceOption((h1, h2) => HintInfo(
-      broadcast = h1.broadcast || h2.broadcast))
+    hints.reduceOption((h1, h2) => h1.merge(h2, hintErrorHandler))
   }
 
-  private def collectHints(plan: LogicalPlan): Seq[HintInfo] = {
+  /**
+   * Extract all hints from the plan, returning a list of extracted hints and the transformed plan
+   * with [[ResolvedHint]] nodes removed. The returned hint list comes in top-down order.
+   * Note that hints can only be extracted from under certain nodes. Those that cannot be extracted
+   * in this method will be cleaned up later by this rule, and may emit warnings depending on the
+   * configurations.
+   */
+  private[sql] def extractHintsFromPlan(plan: LogicalPlan): (LogicalPlan, Seq[HintInfo]) = {
     plan match {
-      case h: ResolvedHint => collectHints(h.child) :+ h.hints
-      case u: UnaryNode => collectHints(u.child)
+      case h: ResolvedHint =>
+        val (plan, hints) = extractHintsFromPlan(h.child)
+        (plan, h.hints +: hints)
+      case u: UnaryNode =>
+        val (plan, hints) = extractHintsFromPlan(u.child)
+        (u.withNewChildren(Seq(plan)), hints)
       // TODO revisit this logic:
       // except and intersect are semi/anti-joins which won't return more data then
       // their left argument, so the broadcast hint should be propagated here
-      case i: Intersect => collectHints(i.left)
-      case e: Except => collectHints(e.left)
-      case _ => Seq.empty
+      case i: Intersect =>
+        val (plan, hints) = extractHintsFromPlan(i.left)
+        (i.copy(left = plan), hints)
+      case e: Except =>
+        val (plan, hints) = extractHintsFromPlan(e.left)
+        (e.copy(left = plan), hints)
+      case p: LogicalPlan => (p, Seq.empty)
     }
   }
 }

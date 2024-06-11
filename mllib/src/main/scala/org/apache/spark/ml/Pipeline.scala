@@ -19,8 +19,8 @@ package org.apache.spark.ml
 
 import java.{util => ju}
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
+import scala.jdk.CollectionConverters._
 
 import org.apache.hadoop.fs.Path
 import org.json4s._
@@ -34,16 +34,14 @@ import org.apache.spark.ml.util._
 import org.apache.spark.ml.util.Instrumentation.instrumented
 import org.apache.spark.sql.{DataFrame, Dataset}
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.util.ArrayImplicits._
 
 /**
- * :: DeveloperApi ::
  * A stage in a pipeline, either an [[Estimator]] or a [[Transformer]].
  */
-@DeveloperApi
 abstract class PipelineStage extends Params with Logging {
 
   /**
-   * :: DeveloperApi ::
    *
    * Check transform validity and derive the output schema from the input schema.
    *
@@ -54,7 +52,6 @@ abstract class PipelineStage extends Params with Logging {
    * Typical implementation should first conduct verification on schema change and parameter
    * validity, including complex parameter interaction checks.
    */
-  @DeveloperApi
   def transformSchema(schema: StructType): StructType
 
   /**
@@ -139,7 +136,7 @@ class Pipeline @Since("1.4.0") (
     val theStages = $(stages)
     // Search for the last estimator.
     var indexOfLastEstimator = -1
-    theStages.view.zipWithIndex.foreach { case (stage, index) =>
+    theStages.iterator.zipWithIndex.foreach { case (stage, index) =>
       stage match {
         case _: Estimator[_] =>
           indexOfLastEstimator = index
@@ -148,7 +145,7 @@ class Pipeline @Since("1.4.0") (
     }
     var curDataset = dataset
     val transformers = ListBuffer.empty[Transformer]
-    theStages.view.zipWithIndex.foreach { case (stage, index) =>
+    theStages.iterator.zipWithIndex.foreach { case (stage, index) =>
       if (index <= indexOfLastEstimator) {
         val transformer = stage match {
           case estimator: Estimator[_] =>
@@ -250,7 +247,7 @@ object Pipeline extends MLReadable[Pipeline] {
         sc: SparkContext,
         path: String): Unit = instrumented { instr =>
       val stageUids = stages.map(_.uid)
-      val jsonParams = List("stageUids" -> parse(compact(render(stageUids.toSeq))))
+      val jsonParams = List("stageUids" -> parse(compact(render(stageUids.toImmutableArraySeq))))
       DefaultParamsWriter.saveMetadata(instance, path, sc, paramMap = Some(jsonParams))
 
       // Save stages
@@ -311,7 +308,7 @@ class PipelineModel private[ml] (
   override def transform(dataset: Dataset[_]): DataFrame = instrumented(instr =>
       instr.withTransformEvent(this, dataset) {
     transformSchema(dataset.schema, logging = true)
-    stages.foldLeft(dataset.toDF)((cur, transformer) =>
+    stages.foldLeft(dataset.toDF())((cur, transformer) =>
       instr.withTransformEvent(transformer, cur)(transformer.transform(cur)))
   })
 

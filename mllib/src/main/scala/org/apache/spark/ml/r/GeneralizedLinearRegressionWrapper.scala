@@ -25,12 +25,12 @@ import org.json4s.JsonDSL._
 import org.json4s.jackson.JsonMethods._
 
 import org.apache.spark.ml.{Pipeline, PipelineModel}
-import org.apache.spark.ml.attribute.AttributeGroup
 import org.apache.spark.ml.feature.RFormula
 import org.apache.spark.ml.r.RWrapperUtils._
 import org.apache.spark.ml.regression._
 import org.apache.spark.ml.util._
 import org.apache.spark.sql._
+import org.apache.spark.util.ArrayImplicits._
 
 private[r] class GeneralizedLinearRegressionWrapper private (
     val pipeline: PipelineModel,
@@ -160,8 +160,8 @@ private[r] object GeneralizedLinearRegressionWrapper
       val pipelinePath = new Path(path, "pipeline").toString
 
       val rMetadata = ("class" -> instance.getClass.getName) ~
-        ("rFeatures" -> instance.rFeatures.toSeq) ~
-        ("rCoefficients" -> instance.rCoefficients.toSeq) ~
+        ("rFeatures" -> instance.rFeatures.toImmutableArraySeq) ~
+        ("rCoefficients" -> instance.rCoefficients.toImmutableArraySeq) ~
         ("rDispersion" -> instance.rDispersion) ~
         ("rNullDeviance" -> instance.rNullDeviance) ~
         ("rDeviance" -> instance.rDeviance) ~

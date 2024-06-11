@@ -21,6 +21,8 @@ import scala.collection.mutable
 
 import org.apache.hadoop.fs.{FileStatus, Path}
 
+import org.apache.spark.internal.LogKeys._
+import org.apache.spark.internal.MDC
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.types.StructType
@@ -36,8 +38,9 @@ import org.apache.spark.sql.types.StructType
 class MetadataLogFileIndex(
     sparkSession: SparkSession,
     path: Path,
+    parameters: Map[String, String],
     userSpecifiedSchema: Option[StructType])
-  extends PartitioningAwareFileIndex(sparkSession, Map.empty, userSpecifiedSchema) {
+  extends PartitioningAwareFileIndex(sparkSession, parameters, userSpecifiedSchema) {
 
   private val metadataDirectory = {
     val metadataDir = new Path(path, FileStreamSink.metadataDir)
@@ -46,7 +49,7 @@ class MetadataLogFileIndex(
     metadataDir
   }
 
-  logInfo(s"Reading streaming file log from $metadataDirectory")
+  logInfo(log"Reading streaming file log from ${MDC(METADATA_DIRECTORY, metadataDirectory)}")
   private val metadataLog =
     new FileStreamSinkLog(FileStreamSinkLog.VERSION, sparkSession, metadataDirectory.toString)
   private val allFilesFromLog = metadataLog.allFiles().map(_.toFileStatus).filterNot(_.isDirectory)
